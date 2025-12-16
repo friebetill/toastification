@@ -72,6 +72,13 @@ class _ToastTimerAnimationBuilderState extends State<ToastTimerAnimationBuilder>
     with SingleTickerProviderStateMixin {
   late AnimationController controller;
 
+  /// Flag to track whether the current controller has been disposed.
+  /// This prevents double-dispose errors that can occur when:
+  /// - didUpdateWidget disposes the old controller and creates a new one
+  /// - dispose() is called while the widget is being rebuilt
+  /// - The Flutter test framework's pumpAndSettle() accelerates animations
+  bool _isControllerDisposed = false;
+
   @override
   void initState() {
     super.initState();
@@ -106,11 +113,18 @@ class _ToastTimerAnimationBuilderState extends State<ToastTimerAnimationBuilder>
   }
 
   void _disposeAnimation() {
+    // Guard against double-dispose - only dispose if not already disposed
+    if (_isControllerDisposed) return;
+    _isControllerDisposed = true;
+
     controller.dispose();
     widget.item.removeListenerOnTimeStatus(_timeStatusListener);
   }
 
   void _initAnimation() {
+    // Reset the disposed flag when creating a new controller
+    _isControllerDisposed = false;
+
     if (widget.item.hasTimer) {
       controller = AnimationController(
         value: CommonUtils.convertRange(
@@ -139,6 +153,9 @@ class _ToastTimerAnimationBuilderState extends State<ToastTimerAnimationBuilder>
   }
 
   void _timeStatusListener() {
+    // Don't interact with the controller if it's already disposed
+    if (_isControllerDisposed) return;
+
     switch (widget.item.timeStatus) {
       case ToastTimeStatus.init:
         controller.reset();
