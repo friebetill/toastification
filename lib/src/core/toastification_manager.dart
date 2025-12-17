@@ -38,6 +38,10 @@ class ToastificationManager {
   @visibleForTesting
   final removeOverlayDelay = const Duration(milliseconds: 50);
 
+  /// Counter to track overlay removal requests.
+  /// When a new toast is added, this is incremented to invalidate pending removals.
+  int _overlayRemovalGeneration = 0;
+
   /// Shows a [ToastificationItem] with the given [builder] and [animationBuilder].
   ///
   /// if the [notifications] list is empty, we will create the [overlayEntry]
@@ -51,6 +55,9 @@ class ToastificationManager {
     required ToastificationCallbacks callbacks,
     Duration? autoCloseDuration,
   }) {
+    // Increment generation to cancel any pending overlay removals immediately
+    _overlayRemovalGeneration++;
+
     final item = ToastificationItem(
       builder: builder,
       alignment: alignment,
@@ -68,6 +75,11 @@ class ToastificationManager {
     }
 
     scheduler.addPostFrameCallback((_) {
+      // Check if overlay was removed between showCustom call and this callback
+      // This can happen if a pending removal ran before this callback
+      if (overlayEntry == null) {
+        _createNotificationHolder(overlayState);
+      }
       _addItemToList(item);
     });
 
@@ -77,11 +89,19 @@ class ToastificationManager {
   void _addItemToList(ToastificationItem item) {
     if (notifications.contains(item)) return;
 
+    // Increment generation to cancel any pending overlay removals
+    _overlayRemovalGeneration++;
+
     notifications.insert(0, item);
-    listGlobalKey.currentState?.insertItem(
-      0,
-      duration: _createAnimationDuration(item),
-    );
+
+    // Only insert if the AnimatedList state is still valid
+    final listState = listGlobalKey.currentState;
+    if (listState != null) {
+      listState.insertItem(
+        0,
+        duration: _createAnimationDuration(item),
+      );
+    }
 
     while (notifications.length > config.maxToastLimit) {
       dismissLast();
@@ -122,42 +142,51 @@ class ToastificationManager {
 
       final removedItem = notifications.removeAt(index);
 
-      /// if the [showRemoveAnimation] is true, we will show the remove animation
-      /// of the notification.
-      if (showRemoveAnimation) {
-        listGlobalKey.currentState?.removeItem(
-          index,
-          (BuildContext context, Animation<double> animation) {
-            return ToastHolderWidget(
-              item: removedItem,
-              animation: animation,
-              alignment: alignment,
-              transformerBuilder: _toastAnimationBuilder(removedItem),
-            );
-          },
-          duration: _createAnimationDuration(removedItem),
-        );
+      // Only interact with AnimatedList if its state is still valid
+      final listState = listGlobalKey.currentState;
+      if (listState != null) {
+        /// if the [showRemoveAnimation] is true, we will show the remove animation
+        /// of the notification.
+        if (showRemoveAnimation) {
+          listState.removeItem(
+            index,
+            (BuildContext context, Animation<double> animation) {
+              return ToastHolderWidget(
+                item: removedItem,
+                animation: animation,
+                alignment: alignment,
+                transformerBuilder: _toastAnimationBuilder(removedItem),
+              );
+            },
+            duration: _createAnimationDuration(removedItem),
+          );
 
-        /// if the [showRemoveAnimation] is false, we will remove the notification
-        /// without showing the remove animation.
-      } else {
-        listGlobalKey.currentState?.removeItem(
-          index,
-          (BuildContext context, Animation<double> animation) {
-            return const SizedBox.shrink();
-          },
-        );
+          /// if the [showRemoveAnimation] is false, we will remove the notification
+          /// without showing the remove animation.
+        } else {
+          listState.removeItem(
+            index,
+            (BuildContext context, Animation<double> animation) {
+              return const SizedBox.shrink();
+            },
+          );
+        }
       }
 
       /// we will remove the [_overlayEntry] if there are no notifications
       /// We need to check if the _notifications list is empty twice.
       /// To make sure after the delay, there are no new notifications added.
       if (notifications.isEmpty) {
+        // Capture current generation to detect if new items are added before removal
+        final currentGeneration = _overlayRemovalGeneration;
         Future.delayed(
           (removedItem.animationDuration ?? config.animationDuration) +
               removeOverlayDelay,
           () {
-            if (notifications.isEmpty) {
+            // Only remove overlay if no new items were added (generation unchanged)
+            // and the list is still empty
+            if (notifications.isEmpty &&
+                _overlayRemovalGeneration == currentGeneration) {
               overlayEntry?.remove();
               overlayEntry = null;
             }
